@@ -187,8 +187,59 @@ export function service<const Env extends Record<string, string | VariableConfig
   return withVariableRefs(node) as ReferencableServiceNode<RailwayProvidedVariable | Extract<keyof Env, string>>;
 }
 
-export function fn<const Env extends Record<string, string | VariableConfig | VariableValue> = {}>(name: string, config: Omit<ServiceConfigInput, "env" | "variables"> & { env?: Env; variables?: Env } = {}): ReferencableServiceNode<RailwayProvidedVariable | Extract<keyof Env, string>> {
-  return withVariableRefs({ ...service(name, config), kind: "function" } as ServiceNode) as ReferencableServiceNode<RailwayProvidedVariable | Extract<keyof Env, string>>;
+export type FunctionRuntime = "bun";
+
+// Runtime images for Railway Functions. Pinned so an authored function plans
+// the same on every machine; pass `source: image(...)` to pick another tag.
+const FUNCTION_IMAGES: Readonly<Record<FunctionRuntime, string>> = {
+  bun: "ghcr.io/railwayapp/function-bun:1.4.0",
+};
+
+/**
+ * Largest function source `fn()` accepts, in UTF-8 bytes. The source is
+ * base64 inside a single argv entry of the start command, so the kernel's
+ * 128 KiB per-argument limit caps the decoded source at 96 KB. The dashboard,
+ * the CLI and the API enforce the same ceiling.
+ */
+export const FUNCTION_SOURCE_MAX_BYTES = 96 * 1024;
+
+export interface FunctionConfigInput extends IntentServiceConfig {
+  /**
+   * Source of the function, as the runtime executes it. Base64-encoded into
+   * the deploy start command, which is how Railway stores function code; the
+   * service has no repository. Must stay within `FUNCTION_SOURCE_MAX_BYTES`.
+   */
+  code?: string;
+  /** Runtime image the function runs on. Defaults to `"bun"`. */
+  runtime?: FunctionRuntime;
+}
+
+export function fn<const Env extends Record<string, string | VariableConfig | VariableValue> = {}>(name: string, config: Omit<FunctionConfigInput, "env" | "variables"> & { env?: Env; variables?: Env } = {}): ReferencableServiceNode<RailwayProvidedVariable | Extract<keyof Env, string>> {
+  const { code, runtime, ...serviceConfig } = config;
+  if (runtime !== undefined && !(runtime in FUNCTION_IMAGES)) {
+    throw new Error(`Unknown function runtime "${String(runtime)}"; supported runtimes: ${Object.keys(FUNCTION_IMAGES).join(", ")}.`);
+  }
+  if ((code !== undefined || runtime !== undefined) && serviceConfig.source === undefined) {
+    serviceConfig.source = image(FUNCTION_IMAGES[runtime ?? "bun"]);
+  }
+  if (code !== undefined) {
+    if (serviceConfig.start ?? serviceConfig.startCommand ?? serviceConfig.run?.command ?? serviceConfig.deploy?.startCommand) {
+      throw new Error(`fn("${name}"): "code" sets the start command; drop "start", "startCommand", "run.command" or "deploy.startCommand".`);
+    }
+    serviceConfig.start = functionStartCommand(code);
+  }
+  return withVariableRefs({ ...service(name, serviceConfig), kind: "function" } as ServiceNode) as ReferencableServiceNode<RailwayProvidedVariable | Extract<keyof Env, string>>;
+}
+
+// The function image's `run.sh` decodes its argument, writes it to
+// `index.tsx` and runs it with the runtime; backboard decodes the same form
+// to show the source in the dashboard.
+function functionStartCommand(code: string): string {
+  const bytes = Buffer.byteLength(code, "utf8");
+  if (bytes > FUNCTION_SOURCE_MAX_BYTES) {
+    throw new Error(`Function source code is ${Math.ceil(bytes / 1024)} KB; the limit is ${FUNCTION_SOURCE_MAX_BYTES / 1024} KB.`);
+  }
+  return `./run.sh ${Buffer.from(code, "utf8").toString("base64")}`;
 }
 
 export interface DatabaseConfig {

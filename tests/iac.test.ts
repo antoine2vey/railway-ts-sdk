@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  FUNCTION_SOURCE_MAX_BYTES,
   RAILWAY_GRAPH_VERSION,
   bucket,
   createRailwayContext,
@@ -179,6 +180,70 @@ describe("Railway IaC authoring", () => {
     expect(service("web", { tracing: { enabled: false } }).tracing).toEqual({ enabled: false });
     expect(fn("worker", { tracing: { enabled: true } }).tracing).toEqual({ enabled: true });
     expect("tracing" in service("web")).toBe(false);
+  });
+
+  describe("fn()", () => {
+    const code = 'export default { fetch: () => new Response("héllo") };\n';
+
+    it("compiles code to the function image plus a base64 start command", () => {
+      // Railway stores function code as `./run.sh <base64>` on a service that
+      // runs the function image; backboard decodes the same form.
+      const node = fn("hello", { code });
+
+      expect(node).toMatchObject({
+        address: "service.hello",
+        type: "service",
+        kind: "function",
+        source: { type: "image", image: "ghcr.io/railwayapp/function-bun:1.4.0" },
+      });
+      const startCommand = node.deploy?.startCommand ?? "";
+      const [cmd, payload, ...rest] = startCommand.split(" ");
+      expect(cmd).toBe("./run.sh");
+      expect(rest).toEqual([]);
+      expect(Buffer.from(payload!, "base64").toString("utf8")).toBe(code);
+    });
+
+    it("keeps the plain service shape when no code or runtime is given", () => {
+      const node = fn("worker", { start: "bun run worker.ts" });
+
+      expect(node.kind).toBe("function");
+      expect(node.source).toBeUndefined();
+      expect(node.deploy?.startCommand).toBe("bun run worker.ts");
+    });
+
+    it("selects the runtime image and lets an explicit source pin another tag", () => {
+      expect(fn("a", { runtime: "bun" }).source).toEqual({ type: "image", image: "ghcr.io/railwayapp/function-bun:1.4.0" });
+      expect(fn("b", { code, source: image("ghcr.io/railwayapp/function-bun:1.2.16") }).source).toEqual({
+        type: "image",
+        image: "ghcr.io/railwayapp/function-bun:1.2.16",
+      });
+      expect(() => fn("c", { runtime: "deno" as "bun" })).toThrow(/Unknown function runtime "deno"/);
+    });
+
+    it("rejects a start command next to code", () => {
+      expect(() => fn("a", { code, start: "bun run index.ts" })).toThrow(/"code" sets the start command/);
+      expect(() => fn("b", { code, deploy: { startCommand: "bun run index.ts" } })).toThrow(/"code" sets the start command/);
+      expect(() => fn("c", { code, run: { command: "bun run index.ts" } })).toThrow(/"code" sets the start command/);
+    });
+
+    it("enforces the 96 KB source limit in UTF-8 bytes", () => {
+      // The payload is one argv entry, so the kernel's per-argument limit caps
+      // the decoded source; the dashboard, CLI and API reject the same size.
+      expect(FUNCTION_SOURCE_MAX_BYTES).toBe(96 * 1024);
+      expect(() => fn("max", { code: "x".repeat(FUNCTION_SOURCE_MAX_BYTES) })).not.toThrow();
+      expect(() => fn("over", { code: "x".repeat(FUNCTION_SOURCE_MAX_BYTES + 1) })).toThrow(
+        "Function source code is 97 KB; the limit is 96 KB.",
+      );
+      // "é" is one character but two bytes.
+      expect(() => fn("utf8", { code: "é".repeat(FUNCTION_SOURCE_MAX_BYTES / 2 + 1) })).toThrow(/limit is 96 KB/);
+    });
+
+    it("still exposes typed env references", () => {
+      const api = fn("api", { code, env: { SECRET: preserve() } });
+
+      expect(api.env.SECRET).toEqual({ type: "reference", resource: "service.api", output: "SECRET" });
+      expect(api.variables).toEqual({ SECRET: { type: "preserve" } });
+    });
   });
 
   it("stamps grouped resources with the group id", () => {
