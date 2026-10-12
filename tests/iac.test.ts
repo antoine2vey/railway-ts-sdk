@@ -196,7 +196,7 @@ describe("Railway IaC authoring", () => {
 
     it("reads codeFile next to the calling file and compiles it to the function image plus a base64 start command", () => {
       // Railway stores function code as `./run.sh <base64>` on a service that
-      // runs the function image; backboard decodes the same form.
+      // runs the function image; Railway decodes the same form.
       const node = fn("hello", { codeFile });
 
       expect(node).toMatchObject({
@@ -258,10 +258,11 @@ describe("Railway IaC authoring", () => {
       expect(() => fn("c", { codeFile, run: { command: "bun run index.ts" } })).toThrow(/"codeFile" sets the start command/);
     });
 
-    it("enforces the 96 KB source limit on the file's UTF-8 bytes", () => {
-      // The payload is one argv entry, so the kernel's per-argument limit caps
-      // the decoded source; the dashboard, CLI and API reject the same size.
-      expect(FUNCTION_SOURCE_MAX_BYTES).toBe(96 * 1024);
+    it("enforces the API's source limit on the file's UTF-8 bytes", () => {
+      // The start command is one argv entry capped at 128 KiB including the
+      // NUL; after the `./run.sh ` prefix the base64 fits 32765 groups of
+      // three bytes. The API derives the same 98295 and rejects larger code.
+      expect(FUNCTION_SOURCE_MAX_BYTES).toBe(98295);
       const dir = mkdtempSync(join(tmpdir(), "railway-fn-"));
       try {
         const write = (file: string, content: string) => {
@@ -269,12 +270,15 @@ describe("Railway IaC authoring", () => {
           writeFileSync(path, content);
           return path;
         };
-        expect(() => fn("max", { codeFile: write("max.ts", "x".repeat(FUNCTION_SOURCE_MAX_BYTES)) })).not.toThrow();
+        const max = fn("max", { codeFile: write("max.ts", "x".repeat(FUNCTION_SOURCE_MAX_BYTES)) });
+        expect(Buffer.byteLength(max.deploy?.startCommand ?? "")).toBeLessThanOrEqual(128 * 1024 - 1);
         expect(() => fn("over", { codeFile: write("over.ts", "x".repeat(FUNCTION_SOURCE_MAX_BYTES + 1)) })).toThrow(
-          "Function source code is 97 KB; the limit is 96 KB.",
+          "Function source code is 98296 bytes; the limit is 98295 bytes",
         );
         // "é" is one character but two bytes.
-        expect(() => fn("utf8", { codeFile: write("utf8.ts", "é".repeat(FUNCTION_SOURCE_MAX_BYTES / 2 + 1)) })).toThrow(/limit is 96 KB/);
+        expect(() => fn("utf8", { codeFile: write("utf8.ts", "é".repeat(49148)) })).toThrow(
+          "Function source code is 98296 bytes; the limit is 98295 bytes",
+        );
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }

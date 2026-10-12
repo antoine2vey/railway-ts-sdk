@@ -17,7 +17,7 @@ export default defineRailway(() => {
         domains: ["hello.example.com"],
       }),
 
-      // The 96 KB limit applies to the file's bytes.
+      // The source limit (just under 96 KB) applies to the file's bytes.
       fn("nightly-cleanup", {
         codeFile: "./functions/cleanup.ts",
         deploy: { cronSchedule: "0 2 * * *", restartPolicyType: "NEVER" },

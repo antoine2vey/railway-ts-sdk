@@ -198,13 +198,18 @@ const FUNCTION_IMAGES: Readonly<Record<FunctionRuntime, string>> = {
   bun: "ghcr.io/railwayapp/function-bun:1.4.0",
 };
 
+// A start command reaches the container as one argv string, and Linux caps a
+// single argument at MAX_ARG_STRLEN: 128 KiB counting the terminating NUL.
+const MAX_COMMAND_BYTES = 128 * 1024 - 1;
+const FUNCTION_START_COMMAND_PREFIX = "./run.sh ";
+
 /**
- * Largest function source `fn()` accepts, in UTF-8 bytes. The source is
- * base64 inside a single argv entry of the start command, so the kernel's
- * 128 KiB per-argument limit caps the decoded source at 96 KB. The dashboard,
- * the CLI and the API enforce the same ceiling.
+ * Largest function source `fn()` accepts, in UTF-8 bytes: 98295. The source
+ * is base64 after the `./run.sh ` prefix of that one argument, so the limit is
+ * the largest whole number of 3-byte groups whose base64 still fits. The API
+ * derives the same number and rejects anything larger on plan and apply.
  */
-export const FUNCTION_SOURCE_MAX_BYTES = 96 * 1024;
+export const FUNCTION_SOURCE_MAX_BYTES = Math.floor((MAX_COMMAND_BYTES - FUNCTION_START_COMMAND_PREFIX.length) / 4) * 3;
 
 export interface FunctionConfigInput extends IntentServiceConfig {
   /**
@@ -221,7 +226,7 @@ export interface FunctionConfigInput extends IntentServiceConfig {
 
 export function fn<const Env extends Record<string, string | VariableConfig | VariableValue> = {}>(name: string, config: Omit<FunctionConfigInput, "env" | "variables"> & { env?: Env; variables?: Env } = {}): ReferencableServiceNode<RailwayProvidedVariable | Extract<keyof Env, string>> {
   const { codeFile, runtime, ...serviceConfig } = config;
-  if (runtime !== undefined && !(runtime in FUNCTION_IMAGES)) {
+  if (runtime !== undefined && !Object.hasOwn(FUNCTION_IMAGES, runtime)) {
     throw new Error(`Unknown function runtime "${String(runtime)}"; supported runtimes: ${Object.keys(FUNCTION_IMAGES).join(", ")}.`);
   }
   if ((codeFile !== undefined || runtime !== undefined) && serviceConfig.source === undefined) {
@@ -250,12 +255,15 @@ function readFunctionSource(name: string, codeFile: string | URL): string {
 // `railway config plan` or `node` runs from. Node's CallSite API gives file
 // names without parsing the stack text; ESM frames carry `file:` URLs (the
 // CLI imports the config with a cache-busting query, which `fileURLToPath`
-// drops).
+// drops). A host that overrides stack formatting or sets `stackTraceLimit`
+// to 0 yields no frames, and the caller falls back to the working directory.
 function callerDirectory(): string | undefined {
   const original = Error.prepareStackTrace;
   Error.prepareStackTrace = (_error, callSites) => callSites;
-  const callSites = new Error().stack as unknown as NodeJS.CallSite[];
+  const stack: unknown = new Error().stack;
   Error.prepareStackTrace = original;
+  if (!Array.isArray(stack)) return undefined;
+  const callSites = stack as NodeJS.CallSite[];
   const self = callSites[0]?.getFileName();
   for (const site of callSites) {
     const file = site.getFileName();
@@ -266,14 +274,14 @@ function callerDirectory(): string | undefined {
 }
 
 // The function image's `run.sh` decodes its argument, writes it to
-// `index.tsx` and runs it with the runtime; backboard decodes the same form
-// to show the source in the dashboard.
+// `index.tsx` and runs it with the runtime; Railway decodes the same form to
+// show the source in the dashboard. The error text matches the API's.
 function functionStartCommand(code: string): string {
   const bytes = Buffer.byteLength(code, "utf8");
   if (bytes > FUNCTION_SOURCE_MAX_BYTES) {
-    throw new Error(`Function source code is ${Math.ceil(bytes / 1024)} KB; the limit is ${FUNCTION_SOURCE_MAX_BYTES / 1024} KB.`);
+    throw new Error(`Function source code is ${bytes} bytes; the limit is ${FUNCTION_SOURCE_MAX_BYTES} bytes`);
   }
-  return `./run.sh ${Buffer.from(code, "utf8").toString("base64")}`;
+  return `${FUNCTION_START_COMMAND_PREFIX}${Buffer.from(code, "utf8").toString("base64")}`;
 }
 
 export interface DatabaseConfig {
