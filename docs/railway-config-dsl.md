@@ -424,33 +424,33 @@ service("web", {
 fn(name: string, config?: FunctionConfigInput)
 
 interface FunctionConfigInput extends ServiceConfigInput {
-  code?: string;
+  codeFile?: string | URL;
   runtime?: "bun"; // default
 }
 ```
 
-Creates a service node with `kind: "function"`. A Railway Function is a single-file service: Railway runs the function image and stores the code base64-encoded in the start command, so there is no repository to point at. `fn()` does that encoding for you.
+Creates a service node with `kind: "function"`. A Railway Function is a single-file service: Railway runs the function image and stores the code base64-encoded in the start command, so there is no repository to point at. `fn()` reads the file and does that encoding for you when the config is evaluated.
 
 ```ts
-import { readFileSync } from "node:fs";
-
 fn("hello", {
-  code: 'export default { fetch: () => new Response("hello") };',
+  codeFile: "./functions/hello.ts",
+  domains: ["hello.example.com"],
 });
 
-fn("cron", {
-  code: readFileSync(new URL("./cron.ts", import.meta.url), "utf8"),
+fn("nightly-cleanup", {
+  codeFile: "./functions/cleanup.ts",
   deploy: { cronSchedule: "0 2 * * *" },
   env: { DATABASE_URL: db.env.DATABASE_URL },
 });
 ```
 
-- `code` compiles to `source: image("ghcr.io/railwayapp/function-bun:1.4.0")` plus `deploy.startCommand: "./run.sh <base64>"` — the same shape the dashboard editor and `railway functions push` write, so the dashboard shows and edits the source as usual.
-- `runtime` picks the runtime image; `bun` is the only runtime today and the default. An explicit `source: image(...)` wins, which is how you pin another image tag.
-- The source must be at most 96 KB (`FUNCTION_SOURCE_MAX_BYTES`, counted in UTF-8 bytes): the whole payload is one argv entry of the container's start command, and the kernel caps a single argument at 128 KiB. Larger code throws at authoring time, before any plan; the API rejects it too.
-- `code` owns the start command, so passing `start`, `startCommand`, `run.command` or `deploy.startCommand` alongside it throws.
+- `codeFile` is a path to the function's source. A relative path resolves against the directory of the file that calls `fn()`, normally `.railway/`, whatever directory `railway config plan` runs from. Absolute paths and `file:` URLs (`new URL("./x.ts", import.meta.url)`) are used as is. A file that cannot be read throws with the resolved path.
+- The file compiles to `source: image("ghcr.io/railwayapp/function-bun:1.4.0")` plus `deploy.startCommand: "./run.sh <base64>"` — the same shape the dashboard editor and `railway functions push` write, so the dashboard shows and edits the source as usual.
+- `runtime` picks the runtime image; `bun` is the only runtime today and the default. An explicit `source: image(...)` wins, which is how you pin another tag.
+- The file must be at most 96 KB (`FUNCTION_SOURCE_MAX_BYTES`, counted in UTF-8 bytes): the whole payload is one argv entry of the container's start command, and the kernel caps a single argument at 128 KiB. Larger code throws at authoring time, before any plan; the API rejects it too.
+- `codeFile` owns the start command, so passing `start`, `startCommand`, `run.command` or `deploy.startCommand` alongside it throws.
 
-Without `code` or `runtime`, `fn()` follows normal service semantics and accepts everything `service()` does.
+Without `codeFile` or `runtime`, `fn()` follows normal service semantics and accepts everything `service()` does.
 
 ## Databases
 

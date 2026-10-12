@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-
 import { defineRailway, fn, postgres, project } from "railway/iac";
 
 export default defineRailway(() => {
@@ -9,22 +7,19 @@ export default defineRailway(() => {
     resources: [
       db,
 
-      // A Railway Function is a single file: `code` is base64-encoded into the
-      // start command of a service running the function image, so there is no
-      // repository to point at. The dashboard shows and edits this source.
+      // A Railway Function is a single file. `codeFile` is read when the
+      // config is evaluated and base64-encoded into the start command of a
+      // service running the function image, so there is no repository to
+      // point at. Relative paths are relative to this file. The dashboard
+      // shows and edits the deployed source.
       fn("hello", {
-        code: `
-          export default {
-            fetch: () => new Response("hello from a function"),
-          };
-        `,
+        codeFile: "./functions/hello.ts",
         domains: ["hello.example.com"],
       }),
 
-      // Larger functions live in their own file next to railway.ts; the 96 KB
-      // limit applies to the decoded source.
+      // The 96 KB limit applies to the file's bytes.
       fn("nightly-cleanup", {
-        code: readFileSync(new URL("./functions/cleanup.ts", import.meta.url), "utf8"),
+        codeFile: "./functions/cleanup.ts",
         deploy: { cronSchedule: "0 2 * * *", restartPolicyType: "NEVER" },
         env: { DATABASE_URL: db.env.DATABASE_URL },
       }),

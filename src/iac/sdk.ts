@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { dirname, isAbsolute, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { assertMinimumIacCliVersion } from "./cli-version.js";
 import { resourceAddress } from "./graph.js";
 import type {
@@ -205,30 +208,61 @@ export const FUNCTION_SOURCE_MAX_BYTES = 96 * 1024;
 
 export interface FunctionConfigInput extends IntentServiceConfig {
   /**
-   * Source of the function, as the runtime executes it. Base64-encoded into
-   * the deploy start command, which is how Railway stores function code; the
-   * service has no repository. Must stay within `FUNCTION_SOURCE_MAX_BYTES`.
+   * Path to the function's source file. `fn()` reads it when the config is
+   * evaluated and base64-encodes it into the deploy start command, which is
+   * how Railway stores function code; the service has no repository. A
+   * relative path resolves against the directory of the file calling `fn()`,
+   * normally `.railway/`. The file must stay within `FUNCTION_SOURCE_MAX_BYTES`.
    */
-  code?: string;
+  codeFile?: string | URL;
   /** Runtime image the function runs on. Defaults to `"bun"`. */
   runtime?: FunctionRuntime;
 }
 
 export function fn<const Env extends Record<string, string | VariableConfig | VariableValue> = {}>(name: string, config: Omit<FunctionConfigInput, "env" | "variables"> & { env?: Env; variables?: Env } = {}): ReferencableServiceNode<RailwayProvidedVariable | Extract<keyof Env, string>> {
-  const { code, runtime, ...serviceConfig } = config;
+  const { codeFile, runtime, ...serviceConfig } = config;
   if (runtime !== undefined && !(runtime in FUNCTION_IMAGES)) {
     throw new Error(`Unknown function runtime "${String(runtime)}"; supported runtimes: ${Object.keys(FUNCTION_IMAGES).join(", ")}.`);
   }
-  if ((code !== undefined || runtime !== undefined) && serviceConfig.source === undefined) {
+  if ((codeFile !== undefined || runtime !== undefined) && serviceConfig.source === undefined) {
     serviceConfig.source = image(FUNCTION_IMAGES[runtime ?? "bun"]);
   }
-  if (code !== undefined) {
+  if (codeFile !== undefined) {
     if (serviceConfig.start ?? serviceConfig.startCommand ?? serviceConfig.run?.command ?? serviceConfig.deploy?.startCommand) {
-      throw new Error(`fn("${name}"): "code" sets the start command; drop "start", "startCommand", "run.command" or "deploy.startCommand".`);
+      throw new Error(`fn("${name}"): "codeFile" sets the start command; drop "start", "startCommand", "run.command" or "deploy.startCommand".`);
     }
-    serviceConfig.start = functionStartCommand(code);
+    serviceConfig.start = functionStartCommand(readFunctionSource(name, codeFile));
   }
   return withVariableRefs({ ...service(name, serviceConfig), kind: "function" } as ServiceNode) as ReferencableServiceNode<RailwayProvidedVariable | Extract<keyof Env, string>>;
+}
+
+function readFunctionSource(name: string, codeFile: string | URL): string {
+  const path = codeFile instanceof URL ? fileURLToPath(codeFile) : isAbsolute(codeFile) ? codeFile : resolve(callerDirectory() ?? process.cwd(), codeFile);
+  try {
+    return readFileSync(path, "utf8");
+  } catch (error) {
+    throw new Error(`fn("${name}"): cannot read codeFile ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+// Directory of the module that called into this one: the config file, so a
+// relative `codeFile` means "next to railway.ts" no matter which directory
+// `railway config plan` or `node` runs from. Node's CallSite API gives file
+// names without parsing the stack text; ESM frames carry `file:` URLs (the
+// CLI imports the config with a cache-busting query, which `fileURLToPath`
+// drops).
+function callerDirectory(): string | undefined {
+  const original = Error.prepareStackTrace;
+  Error.prepareStackTrace = (_error, callSites) => callSites;
+  const callSites = new Error().stack as unknown as NodeJS.CallSite[];
+  Error.prepareStackTrace = original;
+  const self = callSites[0]?.getFileName();
+  for (const site of callSites) {
+    const file = site.getFileName();
+    if (!file || file === self || file.startsWith("node:")) continue;
+    return dirname(file.startsWith("file:") ? fileURLToPath(file) : file);
+  }
+  return undefined;
 }
 
 // The function image's `run.sh` decodes its argument, writes it to

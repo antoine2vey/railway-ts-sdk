@@ -1,3 +1,8 @@
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -183,12 +188,16 @@ describe("Railway IaC authoring", () => {
   });
 
   describe("fn()", () => {
-    const code = 'export default { fetch: () => new Response("héllo") };\n';
+    // Relative to this test file, the same way a config file's codeFile is
+    // relative to .railway/railway.ts.
+    const codeFile = "./fixtures/iac/hello-function.ts";
+    const codePath = fileURLToPath(new URL(codeFile, import.meta.url));
+    const code = readFileSync(codePath, "utf8");
 
-    it("compiles code to the function image plus a base64 start command", () => {
+    it("reads codeFile next to the calling file and compiles it to the function image plus a base64 start command", () => {
       // Railway stores function code as `./run.sh <base64>` on a service that
       // runs the function image; backboard decodes the same form.
-      const node = fn("hello", { code });
+      const node = fn("hello", { codeFile });
 
       expect(node).toMatchObject({
         address: "service.hello",
@@ -201,9 +210,32 @@ describe("Railway IaC authoring", () => {
       expect(cmd).toBe("./run.sh");
       expect(rest).toEqual([]);
       expect(Buffer.from(payload!, "base64").toString("utf8")).toBe(code);
+      expect(code).toContain("héllo");
     });
 
-    it("keeps the plain service shape when no code or runtime is given", () => {
+    it("resolves a relative codeFile against the caller, not the working directory", () => {
+      const cwd = process.cwd();
+      process.chdir(tmpdir());
+      try {
+        expect(fn("hello", { codeFile }).deploy?.startCommand).toBe(fn("hello", { codeFile: codePath }).deploy?.startCommand);
+      } finally {
+        process.chdir(cwd);
+      }
+    });
+
+    it("accepts an absolute path or a file URL", () => {
+      const expected = fn("rel", { codeFile }).deploy?.startCommand;
+      expect(fn("abs", { codeFile: codePath }).deploy?.startCommand).toBe(expected);
+      expect(fn("url", { codeFile: new URL(codeFile, import.meta.url) }).deploy?.startCommand).toBe(expected);
+    });
+
+    it("names the resolved path when codeFile cannot be read", () => {
+      expect(() => fn("missing", { codeFile: "./fixtures/iac/nope.ts" })).toThrow(
+        `fn("missing"): cannot read codeFile ${fileURLToPath(new URL("./fixtures/iac/nope.ts", import.meta.url))}: ENOENT`,
+      );
+    });
+
+    it("keeps the plain service shape when no codeFile or runtime is given", () => {
       const node = fn("worker", { start: "bun run worker.ts" });
 
       expect(node.kind).toBe("function");
@@ -213,33 +245,43 @@ describe("Railway IaC authoring", () => {
 
     it("selects the runtime image and lets an explicit source pin another tag", () => {
       expect(fn("a", { runtime: "bun" }).source).toEqual({ type: "image", image: "ghcr.io/railwayapp/function-bun:1.4.0" });
-      expect(fn("b", { code, source: image("ghcr.io/railwayapp/function-bun:1.2.16") }).source).toEqual({
+      expect(fn("b", { codeFile, source: image("ghcr.io/railwayapp/function-bun:1.2.16") }).source).toEqual({
         type: "image",
         image: "ghcr.io/railwayapp/function-bun:1.2.16",
       });
       expect(() => fn("c", { runtime: "deno" as "bun" })).toThrow(/Unknown function runtime "deno"/);
     });
 
-    it("rejects a start command next to code", () => {
-      expect(() => fn("a", { code, start: "bun run index.ts" })).toThrow(/"code" sets the start command/);
-      expect(() => fn("b", { code, deploy: { startCommand: "bun run index.ts" } })).toThrow(/"code" sets the start command/);
-      expect(() => fn("c", { code, run: { command: "bun run index.ts" } })).toThrow(/"code" sets the start command/);
+    it("rejects a start command next to codeFile", () => {
+      expect(() => fn("a", { codeFile, start: "bun run index.ts" })).toThrow(/"codeFile" sets the start command/);
+      expect(() => fn("b", { codeFile, deploy: { startCommand: "bun run index.ts" } })).toThrow(/"codeFile" sets the start command/);
+      expect(() => fn("c", { codeFile, run: { command: "bun run index.ts" } })).toThrow(/"codeFile" sets the start command/);
     });
 
-    it("enforces the 96 KB source limit in UTF-8 bytes", () => {
+    it("enforces the 96 KB source limit on the file's UTF-8 bytes", () => {
       // The payload is one argv entry, so the kernel's per-argument limit caps
       // the decoded source; the dashboard, CLI and API reject the same size.
       expect(FUNCTION_SOURCE_MAX_BYTES).toBe(96 * 1024);
-      expect(() => fn("max", { code: "x".repeat(FUNCTION_SOURCE_MAX_BYTES) })).not.toThrow();
-      expect(() => fn("over", { code: "x".repeat(FUNCTION_SOURCE_MAX_BYTES + 1) })).toThrow(
-        "Function source code is 97 KB; the limit is 96 KB.",
-      );
-      // "é" is one character but two bytes.
-      expect(() => fn("utf8", { code: "é".repeat(FUNCTION_SOURCE_MAX_BYTES / 2 + 1) })).toThrow(/limit is 96 KB/);
+      const dir = mkdtempSync(join(tmpdir(), "railway-fn-"));
+      try {
+        const write = (file: string, content: string) => {
+          const path = join(dir, file);
+          writeFileSync(path, content);
+          return path;
+        };
+        expect(() => fn("max", { codeFile: write("max.ts", "x".repeat(FUNCTION_SOURCE_MAX_BYTES)) })).not.toThrow();
+        expect(() => fn("over", { codeFile: write("over.ts", "x".repeat(FUNCTION_SOURCE_MAX_BYTES + 1)) })).toThrow(
+          "Function source code is 97 KB; the limit is 96 KB.",
+        );
+        // "é" is one character but two bytes.
+        expect(() => fn("utf8", { codeFile: write("utf8.ts", "é".repeat(FUNCTION_SOURCE_MAX_BYTES / 2 + 1)) })).toThrow(/limit is 96 KB/);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     it("still exposes typed env references", () => {
-      const api = fn("api", { code, env: { SECRET: preserve() } });
+      const api = fn("api", { codeFile, env: { SECRET: preserve() } });
 
       expect(api.env.SECRET).toEqual({ type: "reference", resource: "service.api", output: "SECRET" });
       expect(api.variables).toEqual({ SECRET: { type: "preserve" } });
