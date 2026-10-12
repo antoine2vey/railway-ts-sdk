@@ -137,6 +137,26 @@ describe("Railway IaC authoring", () => {
     });
   });
 
+  // `preDeployTimeoutSeconds` has no shorthand: it rides `deploy` next to the
+  // `preDeploy` shorthand, exactly as `railway config migrate` emits it. This
+  // is the shape that failed to typecheck before 3.13.0 (#93 added the field
+  // without a test).
+  it("keeps deploy.preDeployTimeoutSeconds next to the preDeploy shorthand", () => {
+    const node = service("api", {
+      preDeploy: "npx prisma migrate deploy",
+      deploy: { preDeployTimeoutSeconds: 600 },
+    });
+
+    expect(node.deploy).toEqual({
+      preDeployCommand: ["npx prisma migrate deploy"],
+      preDeployTimeoutSeconds: 600,
+    });
+    expect(service("api", { deploy: { preDeployTimeoutSeconds: 600 } }).deploy).toEqual({
+      preDeployTimeoutSeconds: 600,
+    });
+    expect(JSON.parse(JSON.stringify(node)).deploy.preDeployTimeoutSeconds).toBe(600);
+  });
+
   it("builds database nodes with engine defaults", () => {
     const db = postgres("db", { region: "eu-west1" });
 
