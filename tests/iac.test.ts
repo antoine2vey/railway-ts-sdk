@@ -242,6 +242,18 @@ describe("Railway IaC authoring", () => {
     expect("tracing" in service("web")).toBe(false);
   });
 
+  it("carries the cdn block through to the service node", () => {
+    // The CLI compiles `cdn` into `services[id].cdn` and backboard serialises
+    // only the knobs that differ from the defaults, so the SDK passes the
+    // block through verbatim rather than filling defaults in.
+    const cdn = { enabled: true, defaultTtlSeconds: 86400, htmlCaching: "force", staleWhileRevalidate: false, purgeOnDeploy: "all" } as const;
+    expect(service("web", { cdn }).cdn).toEqual(cdn);
+    expect(service("web", { cdn: { enabled: true } }).cdn).toEqual({ enabled: true });
+    expect(service("web", { cdn: { enabled: false } }).cdn).toEqual({ enabled: false });
+    expect(fn("worker", { cdn: { enabled: true } }).cdn).toEqual({ enabled: true });
+    expect("cdn" in service("web")).toBe(false);
+  });
+
   describe("fn()", () => {
     // Relative to this test file, the same way a config file's codeFile is
     // relative to .railway/railway.ts.
